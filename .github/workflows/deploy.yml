@@ -46,6 +46,20 @@ jobs:
               exit 1
             fi
           done
+          DEPLOY_HOST_CLEAN="$(printf '%s' "${DEPLOY_HOST}" | tr -d '\r')"
+          DEPLOY_PORT_CLEAN="$(printf '%s' "${DEPLOY_PORT}" | tr -d '[:space:]')"
+          DEPLOY_USER_CLEAN="$(printf '%s' "${DEPLOY_USER}" | tr -d '\r')"
+          DEPLOY_PATH_CLEAN="$(printf '%s' "${DEPLOY_PATH}" | tr -d '\r')"
+          if ! printf '%s' "${DEPLOY_PORT_CLEAN}" | grep -Eq '^[0-9]+$'; then
+            echo "DEPLOY_PORT must be numeric after trimming whitespace." >&2
+            exit 1
+          fi
+          {
+            echo "DEPLOY_HOST=${DEPLOY_HOST_CLEAN}"
+            echo "DEPLOY_PORT=${DEPLOY_PORT_CLEAN}"
+            echo "DEPLOY_USER=${DEPLOY_USER_CLEAN}"
+            echo "DEPLOY_PATH=${DEPLOY_PATH_CLEAN}"
+          } >> "$GITHUB_ENV"
           if [ -z "${{ secrets.DEPLOY_SSH_KEY }}" ]; then
             echo "Missing required secret: DEPLOY_SSH_KEY" >&2
             exit 1
