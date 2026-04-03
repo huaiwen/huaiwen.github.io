@@ -1,0 +1,123 @@
+name: Deploy site to A server
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    env:
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.2"
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rsync openssh-client
+
+      - name: Validate deploy secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          for var in DEPLOY_HOST DEPLOY_PORT DEPLOY_USER DEPLOY_PATH; do
+            if [ -z "${!var:-}" ]; then
+              echo "Missing required secret: $var" >&2
+              exit 1
+            fi
+          done
+          if [ -z "${{ secrets.DEPLOY_SSH_KEY }}" ]; then
+            echo "Missing required secret: DEPLOY_SSH_KEY" >&2
+            exit 1
+          fi
+          if [ -z "${{ secrets.DEPLOY_KNOWN_HOSTS }}" ]; then
+            echo "Missing required secret: DEPLOY_KNOWN_HOSTS" >&2
+            exit 1
+          fi
+
+      - name: Install Jekyll toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          gem update --system --no-document
+          gem install bundler jekyll webrick --no-document
+          if [ -f Gemfile ]; then
+            bundle config set path vendor/bundle
+            bundle install --jobs 4 --retry 3
+          fi
+
+      - name: Build site
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f Gemfile ]; then
+            bundle exec jekyll clean
+            bundle exec jekyll build --destination _site
+          else
+            jekyll clean
+            jekyll build --destination _site
+          fi
+          test -f _site/index.html
+
+      - name: Compute release name
+        id: vars
+        shell: bash
+        run: |
+          echo "release_name=$(date -u +%Y%m%d%H%M%S)-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "${{ secrets.DEPLOY_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Upload release
+        shell: bash
+        env:
+          RELEASE_NAME: ${{ steps.vars.outputs.release_name }}
+        run: |
+          set -euo pipefail
+          RELEASE_DIR="${DEPLOY_PATH}/releases/${RELEASE_NAME}"
+          ssh -p "${DEPLOY_PORT}" "${DEPLOY_USER}@${DEPLOY_HOST}" "mkdir -p '${RELEASE_DIR}'"
+          rsync -az --delete \
+            -e "ssh -p ${DEPLOY_PORT}" \
+            _site/ "${DEPLOY_USER}@${DEPLOY_HOST}:${RELEASE_DIR}/"
+
+      - name: Activate release and keep last 5
+        shell: bash
+        env:
+          RELEASE_NAME: ${{ steps.vars.outputs.release_name }}
+        run: |
+          set -euo pipefail
+          RELEASE_DIR="${DEPLOY_PATH}/releases/${RELEASE_NAME}"
+          ssh -p "${DEPLOY_PORT}" "${DEPLOY_USER}@${DEPLOY_HOST}" "
+            set -e
+            ln -sfn '${RELEASE_DIR}' '${DEPLOY_PATH}/current'
+            cd '${DEPLOY_PATH}/releases'
+            ls -1dt */ | tail -n +6 | xargs -r rm -rf
+          "
